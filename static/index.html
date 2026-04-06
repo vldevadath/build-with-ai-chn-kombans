@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bug Bounty Scanner</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg: #070b14;
+            --bg2: #0f1629;
+            --card: #151d30;
+            --border: #1e2d4a;
+            --text: #e2e8f0;
+            --muted: #64748b;
+            --dim: #94a3b8;
+            --green: #10b981;
+            --red: #ef4444;
+            --yellow: #f59e0b;
+            --blue: #3b82f6;
+            --purple: #8b5cf6;
+            --cyan: #06b6d4;
+            --orange: #f97316;
+            --crit: #ef4444;
+            --high: #f97316;
+            --medium: #f59e0b;
+            --low: #3b82f6;
+            --mono: 'JetBrains Mono', monospace;
+            --sans: 'Inter', -apple-system, sans-serif;
+            --r: 10px;
+        }
+
+        body {
+            font-family: var(--sans);
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* ─── Header ────────────────────────── */
+        .header {
+            padding: 24px 32px 0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .logo {
+            font-size: 22px;
+            font-weight: 800;
+            letter-spacing: -0.5px;
+        }
+        .logo span { color: var(--cyan); }
+        .header-badge {
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            color: var(--dim);
+        }
+
+        /* ─── Input Bar ─────────────────────── */
+        .input-bar {
+            margin: 20px 32px;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--r);
+            padding: 20px 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .input-row {
+            display: flex;
+            gap: 12px;
+        }
+        .input-row input {
+            flex: 1;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px 16px;
+            color: var(--text);
+            font-family: var(--mono);
+            font-size: 14px;
+            transition: border-color 0.2s;
+        }
+        .input-row input:focus {
+            outline: none;
+            border-color: var(--cyan);
+        }
+        .input-row input::placeholder { color: var(--muted); }
+
+        #scan-btn {
+            background: linear-gradient(135deg, var(--cyan), var(--blue));
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 12px 28px;
+            font-weight: 700;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.3s;
+            white-space: nowrap;
+        }
+        #scan-btn:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(6,182,212,0.3); }
+        #scan-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+
+        /* ─── Stage Bar ─────────────────────── */
+        .stage-bar {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 0 32px;
+            margin-bottom: 20px;
+        }
+        .stage-pill {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 500;
+            background: var(--bg2);
+            border: 1px solid var(--border);
+            color: var(--muted);
+            transition: all 0.4s;
+        }
+        .stage-dot {
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        .stage-arrow {
+            color: var(--muted);
+            font-size: 16px;
+        }
+        .stage-pill.active {
+            border-color: var(--cyan);
+            color: var(--cyan);
+            box-shadow: 0 0 16px rgba(6,182,212,0.2);
+            animation: pulse 2s infinite;
+        }
+        .stage-pill.done {
+            border-color: var(--green);
+            color: var(--green);
+            animation: none;
+        }
+
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 0 8px rgba(6,182,212,0.2); }
+            50% { box-shadow: 0 0 20px rgba(6,182,212,0.4); }
+        }
+
+        /* ─── Panels ────────────────────────── */
+        .panels {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1.2fr;
+            gap: 16px;
+            padding: 0 32px 32px;
+            height: calc(100vh - 290px);
+            min-height: 400px;
+        }
+        .panel {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--r);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .panel-head {
+            padding: 14px 16px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
+        .panel-title {
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--dim);
+        }
+        .panel-count {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--dim);
+        }
+        .panel-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px;
+        }
+
+        /* scrollbar */
+        .panel-body::-webkit-scrollbar { width: 6px; }
+        .panel-body::-webkit-scrollbar-track { background: transparent; }
+        .panel-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+        /* ─── Log Panel ─────────────────────── */
+        .log-line {
+            padding: 4px 8px;
+            font-family: var(--mono);
+            font-size: 12px;
+            line-height: 1.6;
+            border-left: 3px solid transparent;
+            border-radius: 0 4px 4px 0;
+            margin-bottom: 2px;
+            animation: fadein 0.15s ease;
+            word-break: break-all;
+        }
+        .log-info  { border-left-color: var(--blue); color: var(--dim); }
+        .log-ok    { border-left-color: var(--green); color: var(--green); }
+        .log-warn  { border-left-color: var(--yellow); color: var(--yellow); }
+        .log-error { border-left-color: var(--red); color: var(--red); }
+        .log-ai    { border-left-color: var(--purple); color: var(--purple); }
+        .log-attack { border-left-color: var(--orange); color: var(--orange); }
+        .log-time  { color: var(--muted); margin-right: 6px; }
+
+        @keyframes fadein { from { opacity: 0; transform: translateY(-4px); } }
+
+        /* ─── Finding Cards ─────────────────── */
+        .finding-card {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 14px;
+            margin-bottom: 10px;
+            cursor: pointer;
+            transition: all 0.3s;
+            animation: slidein 0.3s ease;
+        }
+        .finding-card:hover { border-color: var(--cyan); transform: translateX(4px); }
+        .finding-card.active { border-color: var(--cyan); box-shadow: 0 0 12px rgba(6,182,212,0.15); }
+
+        @keyframes slidein { from { opacity: 0; transform: translateX(-16px); } }
+
+        .finding-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+
+        .severity-badge {
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .severity-critical { background: rgba(239,68,68,0.15); color: var(--crit); border: 1px solid rgba(239,68,68,0.3); }
+        .severity-high     { background: rgba(249,115,22,0.15); color: var(--high); border: 1px solid rgba(249,115,22,0.3); }
+        .severity-medium   { background: rgba(245,158,11,0.15); color: var(--medium); border: 1px solid rgba(245,158,11,0.3); }
+        .severity-low      { background: rgba(59,130,246,0.15); color: var(--low); border: 1px solid rgba(59,130,246,0.3); }
+
+        .vuln-type { font-size: 12px; font-weight: 600; color: var(--text); }
+        .finding-url { font-family: var(--mono); font-size: 12px; color: var(--dim); margin-bottom: 4px; word-break: break-all; }
+        .finding-param { font-size: 12px; color: var(--muted); }
+        .finding-param strong { color: var(--text); }
+
+        /* ─── Report Viewer ─────────────────── */
+        #report-body {
+            font-family: var(--mono);
+            font-size: 13px;
+            line-height: 1.7;
+            white-space: pre-wrap;
+            color: var(--dim);
+        }
+
+        /* ─── Empty State ───────────────────── */
+        .empty {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--muted);
+            font-size: 13px;
+            text-align: center;
+            padding: 20px;
+        }
+
+        /* ─── Completion Banner ─────────────── */
+        .complete-banner {
+            background: linear-gradient(135deg, rgba(16,185,129,0.1), rgba(6,182,212,0.1));
+            border: 1px solid rgba(16,185,129,0.3);
+            border-radius: var(--r);
+            padding: 16px 24px;
+            margin: 0 32px 20px;
+            display: none;
+            align-items: center;
+            gap: 12px;
+            animation: fadein 0.5s ease;
+        }
+        .complete-banner.visible { display: flex; }
+        .complete-icon { font-size: 24px; }
+        .complete-text { font-size: 14px; color: var(--green); font-weight: 600; }
+        .complete-sub { font-size: 12px; color: var(--dim); }
+    </style>
+</head>
+<body>
+
+    <!-- Header -->
+    <div class="header">
+        <div class="logo">🎯 Bug Bounty <span>Scanner</span></div>
+        <div class="header-badge">Hackathon Edition • Gemini Flash AI</div>
+    </div>
+
+    <!-- Input Bar -->
+    <div class="input-bar">
+        <div class="input-row">
+            <input type="text" id="target-url" placeholder="Target URL — e.g. http://localhost/" value="http://localhost/">
+        </div>
+        <div class="input-row">
+            <input type="text" id="cookies" placeholder="Cookies — e.g. PHPSESSID=abc123; security=low">
+            <button id="scan-btn">🔍 START SCAN</button>
+        </div>
+    </div>
+
+    <!-- Stage Bar -->
+    <div class="stage-bar">
+        <div class="stage-pill" data-stage="crawl"><span class="stage-dot">○</span> Crawl</div>
+        <div class="stage-arrow">→</div>
+        <div class="stage-pill" data-stage="classify"><span class="stage-dot">○</span> Classify</div>
+        <div class="stage-arrow">→</div>
+        <div class="stage-pill" data-stage="attack"><span class="stage-dot">○</span> Attack</div>
+        <div class="stage-arrow">→</div>
+        <div class="stage-pill" data-stage="report"><span class="stage-dot">○</span> Report</div>
+        <div class="stage-arrow">→</div>
+        <div class="stage-pill" data-stage="complete"><span class="stage-dot">○</span> Done</div>
+    </div>
+
+    <!-- Completion Banner -->
+    <div class="complete-banner" id="complete-banner">
+        <span class="complete-icon">✅</span>
+        <div>
+            <div class="complete-text" id="complete-text">Scan complete</div>
+            <div class="complete-sub" id="complete-sub"></div>
+        </div>
+    </div>
+
+    <!-- 3-Panel Layout -->
+    <div class="panels">
+        <!-- Log Panel -->
+        <div class="panel">
+            <div class="panel-head">
+                <span class="panel-title">Live Log</span>
+            </div>
+            <div class="panel-body" id="log-body">
+                <div class="empty">Enter a target URL and click START SCAN</div>
+            </div>
+        </div>
+
+        <!-- Findings Panel -->
+        <div class="panel">
+            <div class="panel-head">
+                <span class="panel-title">Findings</span>
+                <span class="panel-count" id="findings-count">0</span>
+            </div>
+            <div class="panel-body" id="findings-body">
+                <div class="empty" id="findings-empty">Vulnerabilities will appear here as they are confirmed</div>
+            </div>
+        </div>
+
+        <!-- Report Panel -->
+        <div class="panel">
+            <div class="panel-head">
+                <span class="panel-title">Report Viewer</span>
+                <button id="download-btn" style="display:none; background:var(--bg);border:1px solid var(--border);color:var(--dim);padding:4px 12px;border-radius:6px;font-size:11px;cursor:pointer;">⬇ Download</button>
+            </div>
+            <div class="panel-body">
+                <div id="report-body" class="empty">Click a finding to view its report</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Socket.IO -->
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script>
+        const socket = io();
+
+        // ─── SocketIO Events ────────────────────
+        socket.on('log', (msg) => appendLog(msg.level, msg.text));
+        socket.on('finding', (data) => addFindingCard(data));
+        socket.on('stage', (data) => updateStage(data.stage, data.status));
+        socket.on('scan_complete', (data) => onComplete(data));
+
+        // ─── Scan Button ────────────────────────
+        document.getElementById('scan-btn').onclick = async () => {
+            const url = document.getElementById('target-url').value.trim();
+            const cookies = document.getElementById('cookies').value.trim();
+
+            if (!url) return alert('Enter a target URL');
+            if (!url.startsWith('http://') && !url.startsWith('https://'))
+                return alert('URL must start with http:// or https://');
+
+            clearUI();
+            setScanState(true);
+
+            try {
+                const res = await fetch('/scan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ target_url: url, cookies })
+                });
+                if (!res.ok) {
+                    const err = await res.json();
+                    alert(err.error || 'Failed to start scan');
+                    setScanState(false);
+                }
+            } catch (e) {
+                alert('Could not connect to backend');
+                setScanState(false);
+            }
+        };
+
+        // ─── UI Functions ───────────────────────
+        function appendLog(level, text) {
+            const body = document.getElementById('log-body');
+            // Remove empty state
+            const empty = body.querySelector('.empty');
+            if (empty) empty.remove();
+
+            const el = document.createElement('div');
+            el.className = `log-line log-${level}`;
+            const t = new Date().toLocaleTimeString('en-US', {hour12: false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
+            el.innerHTML = `<span class="log-time">${t}</span>${esc(text)}`;
+            body.appendChild(el);
+
+            // Auto-scroll
+            if (body.scrollHeight - body.scrollTop - body.clientHeight < 80) {
+                body.scrollTop = body.scrollHeight;
+            }
+        }
+
+        function addFindingCard(f) {
+            if (document.querySelector(`[data-fid="${f.id}"]`)) return;
+
+            const empty = document.getElementById('findings-empty');
+            if (empty) empty.style.display = 'none';
+
+            const card = document.createElement('div');
+            card.className = 'finding-card';
+            card.dataset.fid = f.id;
+            card.innerHTML = `
+                <div class="finding-header">
+                    <span class="severity-badge severity-${f.severity.toLowerCase()}">${f.severity}</span>
+                    <span class="vuln-type">${f.vuln_type.toUpperCase()}</span>
+                </div>
+                <div class="finding-url">${esc(f.url)}</div>
+                <div class="finding-param">Param: <strong>${esc(f.param)}</strong> → <code>${esc(f.payload).substring(0,60)}</code></div>
+            `;
+            card.onclick = () => loadReport(f.id);
+            document.getElementById('findings-body').prepend(card);
+
+            const count = document.querySelectorAll('.finding-card').length;
+            document.getElementById('findings-count').textContent = count;
+        }
+
+        function updateStage(stage, status) {
+            const pill = document.querySelector(`[data-stage="${stage}"]`);
+            if (!pill) return;
+            pill.classList.remove('active', 'done');
+            const dot = pill.querySelector('.stage-dot');
+            if (status === 'active') {
+                pill.classList.add('active');
+                dot.textContent = '◉';
+            } else if (status === 'done') {
+                pill.classList.add('done');
+                dot.textContent = '✓';
+            }
+        }
+
+        async function loadReport(id) {
+            document.querySelectorAll('.finding-card').forEach(c => c.classList.remove('active'));
+            const card = document.querySelector(`[data-fid="${id}"]`);
+            if (card) card.classList.add('active');
+
+            const viewer = document.getElementById('report-body');
+            viewer.className = '';  // Remove 'empty' class
+
+            const res = await fetch(`/reports/${id}.md`);
+            if (res.ok) {
+                const text = await res.text();
+                viewer.textContent = text;
+                // Show download button
+                const btn = document.getElementById('download-btn');
+                btn.style.display = 'inline-block';
+                btn.onclick = () => {
+                    const blob = new Blob([text], { type: 'text/markdown' });
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(blob);
+                    a.download = `${id}.md`;
+                    a.click();
+                    URL.revokeObjectURL(a.href);
+                };
+            } else {
+                viewer.textContent = 'Report is being generated... Click again in a few seconds.';
+            }
+        }
+
+        function onComplete(data) {
+            setScanState(false);
+            const banner = document.getElementById('complete-banner');
+            banner.classList.add('visible');
+            document.getElementById('complete-text').textContent =
+                `Scan complete — ${data.confirmed} vulnerability${data.confirmed !== 1 ? 'ies' : 'y'} confirmed`;
+            document.getElementById('complete-sub').textContent =
+                `Finished in ${data.duration}s • ${data.total} total findings`;
+        }
+
+        function setScanState(scanning) {
+            const btn = document.getElementById('scan-btn');
+            btn.disabled = scanning;
+            btn.textContent = scanning ? '⏳ Scanning...' : '🔍 START SCAN';
+        }
+
+        function clearUI() {
+            document.getElementById('log-body').innerHTML = '';
+            document.getElementById('findings-body').innerHTML =
+                '<div class="empty" id="findings-empty">Vulnerabilities will appear here as they are confirmed</div>';
+            document.getElementById('report-body').textContent = 'Click a finding to view its report';
+            document.getElementById('report-body').className = 'empty';
+            document.getElementById('findings-count').textContent = '0';
+            document.getElementById('complete-banner').classList.remove('visible');
+            document.getElementById('download-btn').style.display = 'none';
+            document.querySelectorAll('.stage-pill').forEach(p => {
+                p.classList.remove('active', 'done');
+                p.querySelector('.stage-dot').textContent = '○';
+            });
+        }
+
+        function esc(str) {
+            const d = document.createElement('div');
+            d.textContent = str || '';
+            return d.innerHTML;
+        }
+
+        // Load existing findings on open
+        fetch('/findings').then(r => r.json()).then(fs => {
+            if (fs.length) {
+                const empty = document.getElementById('findings-empty');
+                if (empty) empty.style.display = 'none';
+                fs.forEach(f => addFindingCard(f));
+            }
+        }).catch(() => {});
+    </script>
+</body>
+</html>
