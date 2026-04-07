@@ -64,8 +64,10 @@ Google Gemini AI is the **core brain** of the scanner, integrated at three criti
 ---
 
 ## Demo Video
-Upload your demo video to Google Drive and paste the shareable link here (max 3 minutes).
-[Watch Demo](#)
+
+🎬 **3-minute sped-up demo** showing the full AI-powered vulnerability scanning pipeline in action:
+
+https://github.com/vldevadath/build-with-ai-chn-kombans/blob/main/demo_video.mp4
 
 ---
 
