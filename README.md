@@ -1,118 +1,81 @@
-# 🛡️ AI-Powered Bug Bounty Scanner
+# AI-Powered Bug Bounty Scanner
 
-> **Team Kombans** — Build with AI CHN Hackathon 2026
+## Problem Statement
+Security testing is manual, slow, and expensive. Traditional automated scanners are pattern-matching tools that throw massive wordlists at websites without understanding context. They produce overwhelming false positives and miss nuanced vulnerabilities that require contextual reasoning. There is a critical need for an intelligent, automated vulnerability scanner that can **think like a hacker** — understanding endpoint context, generating targeted payloads, and confirming real exploits with zero manual effort.
 
-An automated, AI-driven web application vulnerability scanner that **thinks like a hacker**. Give it a URL — it crawls, classifies, attacks, and reports vulnerabilities in real-time with zero manual effort.
+## Project Description
+An automated, AI-driven web application vulnerability scanner that crawls a target website, uses **Google Gemini AI** to classify potential vulnerabilities per endpoint, generates smart attack payloads, tests them, and uses AI again to analyze responses and confirm real vulnerabilities — all streamed live to a real-time dashboard.
 
----
+**How it works — 5 automated stages:**
+1. **Fingerprint** — Detects server tech stack, programming language, framework, and WAF presence
+2. **Crawl** — Discovers all endpoints, forms, query parameters, robots.txt & sitemap.xml paths
+3. **Classify (AI)** — Sends endpoint metadata to Gemini to predict vulnerability types based on parameter names, HTTP methods, and URL context
+4. **Attack & Verify** — AI generates targeted payloads (e.g., `' OR '1'='1` for `id` param), sends baseline + attack requests, AI analyzes response differential to confirm exploitation
+5. **Report** — Generates professional Markdown bug bounty reports with severity, evidence, reproduction steps, and remediation
 
-## 🎯 Problem Statement
-
-**Cybersecurity — AI-Powered Threat Detection & Prevention**
-
-Security testing is manual, slow, and expensive. Traditional automated scanners are pattern-matching tools that throw massive wordlists at websites without understanding context. They produce overwhelming false positives and miss nuanced vulnerabilities that require contextual reasoning.
-
-**Our solution:** A scanner that uses **LLM intelligence** to understand each endpoint — what parameters exist, what they do, what vulnerability is most likely — then generates **targeted payloads**, sends them, and uses AI again to **confirm** if the vulnerability is real. Not a guess. Actual proof.
-
----
-
-## ✨ Features
-
-| Feature | Description |
-|---------|-------------|
-| 🕷️ **Smart Crawling** | Automatically discovers endpoints, forms, query parameters, and hidden paths via robots.txt & sitemap.xml |
-| 🎯 **DVWA Auto-Detection** | Detects DVWA targets, auto-logins with CSRF token handling, sets security level, and disables PHPIDS |
-| 🧠 **AI Classification** | Uses Gemini Flash / Groq LLaMA to classify vulnerability types per endpoint based on context |
-| ⚔️ **Automated Attack** | AI-generated targeted payloads for SQLi, XSS, CMDi, LFI, SSRF, IDOR, CSRF, File Upload, Open Redirect |
-| 🔍 **Pattern + AI Analysis** | Local pattern matching for fast detection with AI fallback for edge cases — minimizes false positives |
-| 📡 **Real-Time Dashboard** | Live log streaming, findings panel, and report viewer via WebSocket |
-| 📄 **Auto Reports** | Generates professional Markdown bug bounty reports with curl reproduction steps |
-| 🛡️ **WAF Detection** | Fingerprints target tech stack and detects WAFs (Cloudflare, Akamai, ModSecurity, etc.) |
-| 🔄 **Encoding Bypass** | URL double-encoding, SQL comment bypass, case variation, and whitespace bypass for WAF evasion |
-| 🤖 **Multi-AI Fallback** | Automatic provider fallback: Gemini → Groq → OpenRouter with rate-limit retry |
+**What makes it useful:**
+- Detects **9+ vulnerability types**: SQLi, XSS, CMDi, LFI, SSRF, IDOR, CSRF, File Upload, Open Redirect
+- **Zero false positives** — AI confirms every finding by analyzing actual response differences
+- **DVWA auto-detection** — Auto-logins, sets security level, disables PHPIDS
+- **WAF bypass** — URL double-encoding, SQL comment bypass, case variation
+- **Multi-AI fallback** — Gemini → Groq → OpenRouter with automatic retry on rate limits
+- **Real-time dashboard** — Watch the scanner hack in real-time via WebSocket
 
 ---
 
-## 🔎 Vulnerability Types Detected
+## Google AI Usage
+### Tools / Models Used
+- **Google Gemini 2.0 Flash** (`gemini-2.0-flash`) via `google-genai` Python SDK
 
-| Type | Severity | Detection Method |
-|------|----------|-----------------|
-| SQL Injection (SQLi) | 🔴 Critical | AI payload generation + response analysis |
-| Blind SQL Injection | 🔴 Critical | Time-based delay detection |
-| Command Injection (CMDi) | 🔴 Critical | OS command output pattern matching |
-| Local File Inclusion (LFI) | 🟠 High | Path traversal + file content detection |
-| Server-Side Request Forgery (SSRF) | 🟠 High | Internal IP/metadata response analysis |
-| Insecure Direct Object Reference (IDOR) | 🟠 High | Response differential analysis |
-| File Upload | 🟠 High | Extension/content-type bypass testing |
-| Cross-Site Scripting (XSS) | 🟡 Medium | Reflected payload detection in response |
-| Header Injection | 🟡 Medium | CRLF injection testing |
-| Cross-Site Request Forgery (CSRF) | 🟡 Medium | Token absence detection |
-| Open Redirect | 🔵 Low | Redirect location analysis |
+### How Google AI Was Used
+Google Gemini AI is the **core brain** of the scanner, integrated at three critical pipeline stages:
 
----
+1. **Vulnerability Classification (Stage 2):** The list of discovered endpoints is sent to Gemini with context (parameter names, HTTP methods, URL paths). Gemini predicts which vulnerability type each endpoint is likely susceptible to (SQLi, XSS, CMDi, etc.) based on contextual reasoning — not just pattern matching.
 
-## 🏗️ Architecture
+2. **Smart Payload Generation (Stage 3a):** For each classified endpoint, Gemini generates 3-5 **targeted attack payloads** specific to the vulnerability type and parameter context. For example, a parameter named `ip` on a page called `/exec/` gets command injection payloads like `; cat /etc/passwd` instead of generic SQLi payloads.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Browser Dashboard                         │
-│              (Vanilla HTML/CSS/JS + WebSocket)               │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│    ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌────────┐│
-│    │ STAGE 0  │──▶│ STAGE 1  │──▶│ STAGE 2  │──▶│STAGE 3 ││
-│    │Fingerprint│  │  Crawl   │   │ Classify │   │ Attack  ││
-│    │& WAF Det │   │Endpoints │   │  (AI)    │   │& Verify ││
-│    └──────────┘   └──────────┘   └──────────┘   └────┬────┘│
-│                                                      │      │
-│                                              ┌───────▼─────┐│
-│                                              │  STAGE 4    ││
-│                                              │  Report     ││
-│                                              │ Generation  ││
-│                                              └─────────────┘│
-│                                                             │
-│              Flask + Flask-SocketIO (Python)                 │
-│              AI: Gemini Flash / Groq / OpenRouter            │
-└─────────────────────────────────────────────────────────────┘
-```
+3. **Response Analysis & Confirmation (Stage 3b):** After sending both a baseline request and an attack request, both responses are sent to Gemini. It acts as a security analyst — comparing the two responses to confirm whether the vulnerability was actually exploited (e.g., "all database rows were returned instead of one" → confirmed SQLi).
 
-### How Each Stage Works
-
-1. **Fingerprint** — Detects server technology, language, framework, and WAF presence
-2. **Crawl** — Visits pages, follows links, parses forms with BeautifulSoup, discovers robots.txt & sitemap.xml paths
-3. **Classify** — Sends endpoint metadata to the LLM to predict vulnerability types based on parameter names, HTTP methods, and URL context
-4. **Attack** — AI generates smart payloads (e.g., `' OR '1'='1` for `id` param), sends baseline + attack requests, AI analyzes response differential to confirm exploitation
-5. **Report** — Generates professional Markdown reports with severity, evidence, reproduction steps, and remediation advice
+4. **Report Generation (Stage 4):** Gemini generates professional, submission-ready bug bounty reports with steps to reproduce, impact assessment, and remediation advice.
 
 ---
 
-## 🛠️ Tech Stack
+## Proof of Google AI Usage
 
-| Technology | Purpose |
-|-----------|---------|
-| **Python 3** | Core backend language |
-| **Flask** | Lightweight web server and REST API |
-| **Flask-SocketIO** | Real-time WebSocket communication for live log streaming |
-| **Requests** | HTTP client for sending baseline and attack payloads |
-| **BeautifulSoup4** | HTML parsing for crawling forms, links, and input fields |
-| **Google GenAI (Gemini 2.0 Flash)** | Primary AI brain — classifies, generates payloads, analyzes responses |
-| **Groq (LLaMA 3.3 70B)** | Fallback AI provider with high rate limits |
-| **OpenRouter** | Secondary fallback with free model rotation |
-| **Vanilla HTML/CSS/JS** | Frontend dashboard — dark-mode glassmorphism design, no build step |
+**Code Integration — Gemini SDK initialization and AI provider setup:**
+
+![AI Proof - Code](./proof/screenshot1.png)
+
+**Dashboard showing "GEMINI Ready" badge — confirming active Gemini AI connection:**
+
+![AI Proof - Dashboard](./proof/screenshot2.png)
 
 ---
 
-## 🚀 Quick Start
+## Screenshots
+**Dashboard — Main view with scan input, stage pipeline, stats, and 3-panel layout:**
 
-### Prerequisites
-- Python 3.8+
-- A Gemini or Groq API key (free tier works)
+![Dashboard Main](./assets/screenshot1.png)  
 
-### Setup
+**Findings Panel — Real-time vulnerability discovery (Critical CMDi, SQLi, Medium XSS):**
+
+![Findings Panel](./assets/screenshot2.png)
+
+---
+
+## Demo Video
+Upload your demo video to Google Drive and paste the shareable link here (max 3 minutes).
+[Watch Demo](#)
+
+---
+
+## Installation Steps
 
 ```bash
-# Clone the repo
+# Clone the repository
 git clone https://github.com/vldevadath/build-with-ai-chn-kombans.git
+
+# Go to project folder
 cd build-with-ai-chn-kombans
 
 # Install dependencies
@@ -120,18 +83,16 @@ pip install -r requirements.txt
 
 # Configure API keys
 cp .env.example .env
-# Edit .env with your API key(s)
-```
+# Edit .env with your Gemini API key:
+# GEMINI_API_KEY=your_gemini_api_key_here
 
-### Run
-
-```bash
+# Run the project
 python app.py
 ```
 
 Open **http://127.0.0.1:7331** in your browser.
 
-### Testing with DVWA (Recommended Demo Target)
+### Testing with DVWA (Recommended)
 
 ```bash
 # Start DVWA in Docker
@@ -143,74 +104,5 @@ docker run -d -p 80:80 --name dvwa vulnerables/web-dvwa
 
 ---
 
-## 📸 Dashboard
-
-The real-time dashboard features:
-- **Live Log Panel** — Watch the scanner crawl, classify, and attack in real-time
-- **Findings Panel** — Severity-tagged vulnerability cards appear as they're discovered
-- **Report Viewer** — Click any finding to view the full professional bug bounty report
-- **Stage Pipeline** — Visual indicator showing current scan progress
-- **Stats Bar** — Live counters for Critical/High/Medium/Low findings
-
----
-
-## 🔧 Configuration
-
-### Environment Variables (`.env`)
-
-```env
-GEMINI_API_KEY=your_gemini_api_key_here    # Primary AI (1500 req/day free)
-GROQ_API_KEY=your_groq_api_key_here        # Fallback AI (14400 req/day free)
-FLASK_PORT=7331                             # Server port
-```
-
-### Scanner Options (via Dashboard)
-
-| Option | Description |
-|--------|-------------|
-| **Target URL** | The web application URL to scan |
-| **Cookies** | Optional session cookies for authenticated scanning |
-| **Username / Password** | Auto-login credentials for generic sites |
-| **AI-Assisted Mode** | Toggle AI classification and analysis |
-| **Aggressive Mode** | Enable encoding bypass and extended payloads |
-
----
-
-## 📁 Project Structure
-
-```
-├── app.py              # Single-file backend (Flask + all scan logic)
-├── static/
-│   └── index.html      # Full frontend (HTML + CSS + JS in one file)
-├── requirements.txt    # Python dependencies
-├── .env.example        # Environment variable template
-├── .gitignore          # Git ignore rules
-├── findings.json       # Runtime: discovered vulnerabilities
-└── reports/            # Runtime: generated Markdown reports
-```
-
----
-
-## 🛡️ Safety & Ethics
-
-This tool is designed for **authorized security testing only**.
-
-- **Scope-locked** — Only scans the URL entered by the user
-- **Local-only** — Flask binds to `127.0.0.1`, not exposed to the network
-- **Rate-limited** — Sequential exploit execution, no parallel attacks
-- **Non-destructive** — Read-only payloads; no data modification or persistent access
-- **Educational** — Built for hackathon demonstration against intentionally vulnerable apps (DVWA)
-
-> ⚠️ **Disclaimer:** Only use this tool on systems you own or have explicit written permission to test. Unauthorized access to computer systems is illegal.
-
----
-
-## 👥 Team
-
-**Team Kombans** — Codeerum Hackathon 2026
-
----
-
-## 📄 License
-
-MIT License — See [LICENSE](LICENSE) for details.
+## Team
+**Team Kombans** — Codeerum | Build with AI CHN Hackathon 2026
